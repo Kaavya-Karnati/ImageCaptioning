@@ -1,34 +1,74 @@
 import torch
+from torch.utils.data import DataLoader
 import torch.optim as optim
 from models.encoder import EncoderCNN
 from models.decoder import DecoderRNN
+from utils.dataset import Flickr8kDataset
+from utils.collate_fn import collate_fn
+import torchvision.transforms as transforms
+import os
 
-# Define model parameters
-embed_size = 256
-hidden_size = 512
-vocab_size = 5000
-num_layers = 1
-learning_rate = 0.001
+def train():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Initialize models
-encoder = EncoderCNN(embed_size)
-decoder = DecoderRNN(embed_size, hidden_size, vocab_size, num_layers)
+    # Hyperparameters
+    EMBED_SIZE = 512
+    HIDDEN_SIZE = 512
+    VOCAB_SIZE = 5000
+    NUM_LAYERS = 1
+    LEARNING_RATE = 0.001
+    BATCH_SIZE = 32
+    NUM_EPOCHS = 10
 
-# Loss and optimizer
-criterion = torch.nn.CrossEntropyLoss()
-optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=learning_rate)
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    ])
 
-# Training loop
-for epoch in range(10):
-    for images, captions in dataloader:
-        features = encoder(images)
-        outputs = decoder(features, captions)
-        loss = criterion(outputs.view(-1, vocab_size), captions.view(-1))
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-    print(f"Epoch {epoch}, Loss: {loss.item()}")
+    train_dataset = Flickr8kDataset(root_dir="data/Flickr8k", captions_file="data/captions.csv", transform=transform)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
 
-# Save model
-torch.save(encoder.state_dict(), "models/encoder.pth")
-torch.save(decoder.state_dict(), "models/decoder.pth")
+    encoder = EncoderCNN(embed_size=EMBED_SIZE).to(device)
+    decoder = DecoderRNN(embed_size=EMBED_SIZE, hidden_size=HIDDEN_SIZE, vocab_size=VOCAB_SIZE, num_layers=NUM_LAYERS).to(device)
+
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding token
+    optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=LEARNING_RATE)
+
+    for epoch in range(NUM_EPOCHS):
+        encoder.train()
+        decoder.train()
+        total_loss = 0
+
+        for i, (images, captions) in enumerate(train_loader):
+            images, captions = images.to(device), captions.to(device)
+
+            # Forward pass
+            features = encoder(images)
+            outputs = decoder(features, captions)
+
+            # Flatten outputs and captions for loss calculation
+            outputs = outputs.view(-1, VOCAB_SIZE)  # (batch_size, vocab_size)
+            captions = captions.view(-1)
+
+            # Compute loss
+            loss = criterion(outputs, captions)
+            total_loss += loss.item()
+
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            if i % 100 == 0:
+                print(f"Epoch [{epoch+1}/{NUM_EPOCHS}], Step [{i}/{len(train_loader)}], Loss: {loss.item():.4f}")
+
+        avg_loss = total_loss / len(train_loader)
+        print(f"Epoch [{epoch+1}/{NUM_EPOCHS}], Average Loss: {avg_loss:.4f}")
+
+    if not os.path.exists("models"):
+        os.makedirs("models")
+
+    torch.save(encoder.state_dict(), "models/encoder.pth")
+    torch.save(decoder.state_dict(), "models/decoder.pth")
+    print("Training completed. Models saved!")
